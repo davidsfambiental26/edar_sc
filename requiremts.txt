@@ -1,7 +1,7 @@
 streamlit
 numpy
 pandas
-matplotlib
+matplotlib==3.7.1
 seaborn
 scikit-learn
-reportlab
+reportlab==3.6.12
