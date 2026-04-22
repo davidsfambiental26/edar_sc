@@ -1,7 +1,0 @@
-streamlit
-numpy
-pandas
-matplotlib==3.7.1
-seaborn
-scikit-learn
-reportlab==3.6.12
