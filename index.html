@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemelo Digital - EDAR Barrio Buenos Aires</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; display: flex; }
+        .sidebar { width: 300px; background: #2c3e50; color: white; padding: 20px; height: 100vh; position: fixed; overflow-y: auto; }
+        .content { margin-left: 340px; padding: 20px; flex-grow: 1; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2 { color: #2c3e50; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9em; }
+        input[type="range"], select { width: 100%; }
+        .status { padding: 15px; border-radius: 5px; font-weight: bold; margin-bottom: 20px; }
+        .status-ok { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        canvas { max-height: 300px; margin-bottom: 30px; }
+        .rec-list { list-style-type: disc; padding-left: 20px; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2>Parámetros Base</h2>
+    <div class="control-group">
+        <label>Caudal base (Q): <span id="val-q">130</span> m³/h</label>
+        <input type="range" id="q_base" min="80" max="250" value="130" oninput="updateSim()">
+    </div>
+    <div class="control-group">
+        <label>DO base: <span id="val-do">2.7</span> mg/L</label>
+        <input type="range" id="do_base" min="1" max="4" step="0.1" value="2.7" oninput="updateSim()">
+    </div>
+    <div class="control-group">
+        <label>MLSS base: <span id="val-mlss">3300</span> mg/L</label>
+        <input type="range" id="mlss_base" min="2600" max="4500" value="3300" oninput="updateSim()">
+    </div>
+    <div class="control-group">
+        <label>Intensidad Soplante:</label>
+        <select id="blower" onchange="updateSim()">
+            <option value="0.5">0.5 (Baja)</option>
+            <option value="1.0" selected>1.0 (Normal)</option>
+            <option value="1.5">1.5 (Alta)</option>
+        </select>
+    </div>
+
+    <hr>
+    <h2>Escenario What-If</h2>
+    <div class="control-group">
+        <label>Tipo de Evento:</label>
+        <select id="scenario" onchange="updateSim()">
+            <option value="Vertido industrial">Vertido industrial</option>
+            <option value="Lluvia torrencial">Lluvia torrencial</option>
+        </select>
+    </div>
+    <div class="control-group">
+        <label>Intensidad del evento: <span id="val-factor">0</span>%</label>
+        <input type="range" id="factor" min="0" max="300" value="0" oninput="updateSim()">
+    </div>
+</div>
+
+<div class="content">
+    <h1>Motor de Simulación What‑If - EDAR</h1>
+    <div id="status-box" class="status"></div>
+
+    <div class="card">
+        <h2>Evolución Temporal (4 horas)</h2>
+        <canvas id="chartQ"></canvas>
+        <canvas id="chartDO"></canvas>
+        <canvas id="chartDBO"></canvas>
+    </div>
+
+    <div class="card">
+        <h2>Recomendaciones Operativas</h2>
+        <ul id="recommendations" class="rec-list"></ul>
+    </div>
+</div>
+
+<script>
+    let charts = {};
+
+    function simulateDBO5(DO, MLSS, Q, Q_max) {
+        const DO_norm = Math.min(Math.max(DO / 4.0, 0), 1);
+        const MLSS_norm = Math.min(Math.max((MLSS - 2000) / 4000, 0), 1);
+        const carga_norm = Math.min(Math.max(Q / (Q_max + 1e-6), 0), 1);
+
+        let removal_eff = 0.2 + 0.5 * DO_norm + 0.3 * MLSS_norm;
+        removal_eff = Math.min(Math.max(removal_eff, 0), 0.95);
+
+        const overload_penalty = 1 + 1.5 * carga_norm;
+        let DBO5 = 60 * (1 - removal_eff) * overload_penalty;
+        
+        // Simulación de ruido aleatorio leve
+        DBO5 += (Math.random() - 0.5) * 1.6; 
+        return Math.max(0, DBO5);
+    }
+
+    function runSimulation() {
+        const Q_base = parseFloat(document.getElementById('q_base').value);
+        const DO_base = parseFloat(document.getElementById('do_base').value);
+        const MLSS_base = parseFloat(document.getElementById('mlss_base').value);
+        const blower = parseFloat(document.getElementById('blower').value);
+        const scenario = document.getElementById('scenario').value;
+        const factor = parseFloat(document.getElementById('factor').value);
+
+        const Q_max = 500;
+        const minutes = 240;
+        
+        let results = { times: [], Q: [], DO: [], DBO5: [], satTime: null };
+        let currentDO = DO_base;
+        let currentQ = Q_base;
+
+        for (let m = 0; m <= minutes; m += 5) {
+            let t_h = m / 60.0;
+            let DBO5_in, factor_dec = factor / 100;
+
+            if (scenario === "Vertido industrial") {
+                DBO5_in = 35 * (1 + factor_dec);
+                currentDO = Math.max(0.5, currentDO - 0.015 * factor_dec);
+            } else {
+                currentQ = Q_base * (1 + factor_dec);
+                currentDO = Math.max(0.5, currentDO - 0.02 * factor_dec);
+            }
+
+            currentDO += 0.035 * (blower - 1.0);
+            let DBO5_eff = simulateDBO5(currentDO, MLSS_base, currentQ, Q_max);
+
+            if (results.satTime === null && (currentQ / Q_max > 0.9 || DBO5_eff > 35)) {
+                results.satTime = t_h;
+            }
+
+            results.times.push(t_h.toFixed(2));
+            results.Q.push(currentQ.toFixed(1));
+            results.DO.push(currentDO.toFixed(2));
+            results.DBO5.push(DBO5_eff.toFixed(2));
+        }
+        return results;
+    }
+
+    function updateSim() {
+        // Actualizar etiquetas UI
+        document.getElementById('val-q').innerText = document.getElementById('q_base').value;
+        document.getElementById('val-do').innerText = document.getElementById('do_base').value;
+        document.getElementById('val-mlss').innerText = document.getElementById('mlss_base').value;
+        document.getElementById('val-factor').innerText = document.getElementById('factor').value;
+
+        const data = runSimulation();
+        const statusBox = document.getElementById('status-box');
+        
+        if (data.satTime === null) {
+            statusBox.className = "status status-ok";
+            statusBox.innerText = "SISTEMA ESTABLE: No se prevé saturación en las próximas 4 horas.";
+        } else {
+            statusBox.className = "status status-error";
+            statusBox.innerText = `ALERTA: Saturación estimada en ${data.satTime.toFixed(2)} horas.`;
+        }
+
+        updateCharts(data);
+        updateRecommendations(data.satTime);
+    }
+
+    function updateCharts(data) {
+        const commonOptions = { responsive: true, scales: { x: { title: { display: true, text: 'Horas' } } } };
+
+        if (charts.Q) charts.Q.destroy();
+        charts.Q = new Chart(document.getElementById('chartQ'), {
+            type: 'line',
+            data: { labels: data.times, datasets: [{ label: 'Caudal (m³/h)', data: data.Q, borderColor: '#3498db', fill: false }] },
+            options: commonOptions
+        });
+
+        if (charts.DO) charts.DO.destroy();
+        charts.DO = new Chart(document.getElementById('chartDO'), {
+            type: 'line',
+            data: { 
+                labels: data.times, 
+                datasets: [
+                    { label: 'Oxígeno Disuelto (mg/L)', data: data.DO, borderColor: '#2ecc71', fill: false },
+                    { label: 'Límite Crítico', data: Array(data.times.length).fill(2.0), borderColor: 'red', borderDash: [5, 5], fill: false }
+                ] 
+            },
+            options: commonOptions
+        });
+
+        if (charts.DBO) charts.DBO.destroy();
+        charts.DBO = new Chart(document.getElementById('chartDBO'), {
+            type: 'line',
+            data: { 
+                labels: data.times, 
+                datasets: [
+                    { label: 'DBO5 Efluente (mg/L)', data: data.DBO5, borderColor: '#e74c3c', fill: false },
+                    { label: 'Límite Legal (25)', data: Array(data.times.length).fill(25), borderColor: 'black', borderDash: [5, 5], fill: false }
+                ] 
+            },
+            options: commonOptions
+        });
+    }
+
+    function updateRecommendations(sat_time) {
+        const scenario = document.getElementById('scenario').value;
+        const blower = parseFloat(document.getElementById('blower').value);
+        const recList = document.getElementById('recommendations');
+        recList.innerHTML = "";
+        
+        let recs = [];
+        if (!sat_time) {
+            recs.push("El sistema se mantiene estable.");
+        } else {
+            if (sat_time < 1.0) recs.push("Riesgo muy alto: saturación inminente.");
+            else recs.push("Riesgo moderado: preparar protocolos de contingencia.");
+            
+            if (scenario === "Vertido industrial") {
+                recs.push("Derivar caudal a tanques de tormentas.");
+                recs.push("Incrementar aireación (Soplante > 1.5).");
+            } else {
+                recs.push("Optimizar reparto hidráulico.");
+                recs.push("Mantener DO > 2 mg/L para proteger biológico.");
+            }
+        }
+        
+        recs.forEach(r => {
+            let li = document.createElement('li');
+            li.innerText = r;
+            recList.appendChild(li);
+        });
+    }
+
+    // Iniciar
+    window.onload = updateSim;
+</script>
+
+</body>
+</html>
